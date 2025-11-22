@@ -1,0 +1,1075 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EChat</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Google Font: Inter -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { 
+            getAuth, 
+            onAuthStateChanged, 
+            createUserWithEmailAndPassword, 
+            signInWithEmailAndPassword, 
+            signOut,
+            signInAnonymously,
+            signInWithCustomToken
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { 
+            getFirestore, 
+            doc, 
+            getDoc,
+            setDoc, 
+            addDoc, 
+            collection, 
+            query, 
+            where, 
+            getDocs, 
+            onSnapshot, 
+            serverTimestamp,
+            orderBy,
+            setLogLevel,
+            updateDoc,
+            arrayUnion,
+            deleteDoc
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- Firebase Config ---
+        // PASTE YOUR CONFIG OBJECT HERE!
+        // This is the *only* place you need to add your keys.
+        // It's safe to do this *in your own file* but NEVER share it.
+        const firebaseConfig = {
+            apiKey: "AIzaSyB0CviQAFWZZoBk-m2p4_dTqKXrSjehrbE",
+  authDomain: "echat-600ea.firebaseapp.com",
+  projectId: "echat-600ea",
+  storageBucket: "echat-600ea.firebasestorage.app",
+  messagingSenderId: "1009772364798",
+  appId: "1:1009772364798:web:ef8e64b8cad98e0158f6af",
+  measurementId: "G-373ZKQB1J9"
+        };
+        
+        // These are for the special environment, we'll just set defaults
+        const appId = typeof __app_id !== 'undefined' ? __app_id : firebaseConfig.projectId || 'default-app-id';
+        // We remove the initialAuthToken logic as it conflicts with your custom config
+        // --- End Firebase Config ---
+
+        // Firebase App Instances
+        let app, auth, db;
+
+        // Global State
+        let currentUserId = null;
+        let currentUserEmail = null;
+        let currentUsername = null; // Added for username
+        let currentChatId = null;
+        let messageUnsubscribe = null; // Function to stop listening to a chat
+        let allUsers = []; // Cache for user list
+        let allChats = []; // Cache for chat list
+        let currentUserProfile = null; // Will hold { friends: [] }
+        let pendingRequests = []; // Cache for friend requests
+
+        // DOM Elements
+        let authView, chatView, loginForm, signupForm, authError, authToggle;
+        let userInfo, logoutButton, createGroupBtn;
+        let chatsList, usersList, friendsList, friendRequestsList, userSearchInput;
+        let chatPanel, welcomeMessage, chatArea, chatHeaderName, messagesList, messageForm, messageInput;
+        let createGroupModal, createGroupForm, groupNameInput, groupMembersList, cancelGroupBtn, groupModalError;
+        let notificationsBtn; // Added for notifications
+
+        // --- Styles ---
+        const styles = `
+            body { 
+                font-family: 'Inter', sans-serif; 
+                overflow-y: hidden; /* Hide vertical scrollbar */
+            }
+            [v-cloak] { display: none; }
+            .chat-bubble {
+                max-width: 70%;
+                padding: 10px 14px;
+                border-radius: 16px;
+            }
+            .chat-bubble-sent {
+                background-color: #3b82f6; /* blue-500 */
+                color: white;
+                border-bottom-right-radius: 4px;
+                align-self: flex-end;
+            }
+            .chat-bubble-received {
+                background-color: #e5e7eb; /* gray-200 */
+                color: #1f2937; /* gray-800 */
+                border-bottom-left-radius: 4px;
+                align-self: flex-start;
+            }
+            /* Scrollbar styling */
+            .sidebar-scroll::-webkit-scrollbar { width: 6px; }
+            .sidebar-scroll::-webkit-scrollbar-thumb { background-color: #cbd5e1; border-radius: 3px; }
+            .chat-scroll::-webkit-scrollbar { width: 8px; }
+            .chat-scroll::-webkit-scrollbar-thumb { background-color: #94a3b8; border-radius: 4px; }
+            
+            /* Notification Button pulse */
+            .pulse-gray {
+                animation: pulse-gray 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+            }
+            @keyframes pulse-gray {
+                0%, 100% { opacity: 1; }
+                50% { opacity: .5; }
+            }
+        `;
+        const styleSheet = document.createElement("style");
+        styleSheet.innerText = styles;
+        document.head.appendChild(styleSheet);
+        
+        // --- Function Definitions ---
+        // We define all functions *before* they are used.
+
+        async function initFirebase() {
+            try {
+                // Check if the user has filled in their config
+                if (firebaseConfig.apiKey.includes("PASTE_YOUR")) {
+                    authError.textContent = "Please paste your Firebase config into EChat.html (line 35).";
+                    return;
+                }
+
+                app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
+                setLogLevel('debug'); // Enable verbose logging for Firestore
+
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        currentUserId = user.uid;
+                        currentUserEmail = user.email; // We still get email from auth
+
+                        // Now, get the user's profile from Firestore
+                        const userRef = doc(db, `artifacts/${appId}/public/data/users`, user.uid);
+                        const userDoc = await getDoc(userRef);
+
+                        if (userDoc.exists()) {
+                            currentUsername = userDoc.data().username;
+                        } else {
+                            // This might happen if profile creation failed
+                            currentUsername = user.email.split('@')[0]; // Fallback
+                        }
+                        
+                        // Update UI
+                        userInfo.innerHTML = `
+                            <p class="text-sm font-medium text-gray-700 truncate">Logged in as: <strong>${currentUsername}</strong></p>
+                            <p class="text-xs text-gray-500 mt-1">Email: <span class="break-all">${currentUserEmail}</span></p>
+                            <p class="text-xs text-gray-500 mt-1">User ID: <span class="break-all">${currentUserId}</span></p>
+                        `;
+                        showChatView();
+                        
+                        // Start loading data
+                        listenForCurrentUserProfile(); // Listen for friend list changes
+                        await loadUsersAndChats();
+
+                        // Check and update notification button
+                        updateNotificationButtonState();
+
+                    } else {
+                        currentUserId = null;
+                        currentUserEmail = null;
+                        currentUsername = null; // Clear username
+                        showAuthView();
+                        clearChatData();
+                    }
+                });
+
+            } catch (error) {
+                console.error("Firebase Init Error:", error);
+                authError.textContent = "Error initializing application. Check console.";
+            }
+        }
+
+        // --- Notification Functions ---
+
+        function requestNotificationPermission() {
+            if (!("Notification" in window)) {
+                alert("This browser does not support desktop notifications.");
+                return;
+            }
+
+            if (Notification.permission === 'granted') {
+                new Notification("Notifications are on!", {
+                    body: "You'll now be notified of new messages.",
+                    icon: "https://placehold.co/96x96/3b82f6/white?text=EChat"
+                });
+            } else if (Notification.permission !== 'denied') {
+                Notification.requestPermission().then((permission) => {
+                    if (permission === 'granted') {
+                        new Notification("Notifications are on!", {
+                            body: "You'll now be notified of new messages.",
+                            icon: "https://placehold.co/96x96/3b82f6/white?text=EChat"
+                        });
+                    }
+                    updateNotificationButtonState();
+                });
+            }
+            updateNotificationButtonState();
+        }
+
+        function updateNotificationButtonState() {
+            if (!notificationsBtn) return;
+
+            if (!("Notification" in window)) {
+                notificationsBtn.classList.add('hidden');
+                return;
+            }
+
+            switch (Notification.permission) {
+                case 'granted':
+                    notificationsBtn.textContent = 'Notify: On';
+                    notificationsBtn.classList.remove('bg-gray-400', 'hover:bg-gray-500', 'pulse-gray');
+                    notificationsBtn.classList.add('bg-green-600', 'cursor-default');
+                    notificationsBtn.disabled = true;
+                    break;
+                case 'denied':
+                    notificationsBtn.textContent = 'Notify: Blocked';
+                    notificationsBtn.classList.remove('bg-gray-400', 'hover:bg-gray-500', 'pulse-gray');
+                    notificationsBtn.classList.add('bg-red-600', 'cursor-not-allowed');
+                    notificationsBtn.disabled = true;
+                    break;
+                default: // 'default'
+                    notificationsBtn.textContent = 'Enable Notifications';
+                    notificationsBtn.classList.add('bg-gray-400', 'hover:bg-gray-500', 'pulse-gray');
+                    notificationsBtn.classList.remove('bg-green-600', 'bg-red-600', 'cursor-default', 'cursor-not-allowed');
+                    notificationsBtn.disabled = false;
+                    break;
+            }
+        }
+
+        function showNotification(username, message) {
+            // Check permission, window focus
+            if (Notification.permission !== 'granted' || !document.hidden) {
+                return;
+            }
+
+            const notification = new Notification(`New message from ${username}`, {
+                body: message,
+                icon: 'https://placehold.co/96x96/3b82f6/white?text=EChat'
+            });
+
+            // Optional: close notification after 5 seconds
+            setTimeout(notification.close.bind(notification), 5000);
+        }
+
+
+        // --- Auth Functions ---
+        
+        function toggleAuthMode() {
+            if (loginForm.classList.contains('hidden')) {
+                // Switch to Login
+                loginForm.classList.remove('hidden');
+                signupForm.classList.add('hidden');
+                authToggle.textContent = "Don't have an account? Sign Up";
+            } else {
+                // Switch to Sign Up
+                loginForm.classList.add('hidden');
+                signupForm.classList.remove('hidden');
+                authToggle.textContent = "Already have an account? Login";
+            }
+            authError.textContent = '';
+        }
+
+        async function handleSignUp(e) {
+            e.preventDefault();
+            const username = signupForm.username.value.trim();
+            const email = signupForm.email.value;
+            const password = signupForm.password.value;
+            
+            if (!username) {
+                authError.textContent = "Please enter a username.";
+                return;
+            }
+
+            try {
+                authError.textContent = '';
+                
+                // 1. Check if username is already taken
+                const usersRef = collection(db, `artifacts/${appId}/public/data/users`);
+                const q = query(usersRef, where("username_lowercase", "==", username.toLowerCase()));
+                const querySnapshot = await getDocs(q);
+                
+                if (!querySnapshot.empty) {
+                    authError.textContent = "This username is already taken. Please choose another.";
+                    return;
+                }
+
+                // 2. If username is available, create the user
+                const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+                
+                // 3. Create a public user profile
+                await createUserProfile(userCredential.user, username);
+
+            } catch (error) {
+                console.error("Sign Up Error:", error);
+                authError.textContent = error.message;
+            }
+        }
+
+        async function handleLogin(e) {
+            e.preventDefault();
+            const email = loginForm.email.value;
+            const password = loginForm.password.value;
+            
+            try {
+                authError.textContent = '';
+                await signInWithEmailAndPassword(auth, email, password);
+            } catch (error) {
+                console.error("Login Error:", error);
+                authError.textContent = error.message;
+            }
+        }
+
+        async function handleLogout() {
+            try {
+                await signOut(auth);
+            } catch (error) {
+                console.error("Logout Error:", error);
+            }
+        }
+
+        async function createUserProfile(user, username) {
+            // Create a doc in the public users collection
+            const userRef = doc(db, `artifacts/${appId}/public/data/users`, user.uid);
+            try {
+                await setDoc(userRef, {
+                    uid: user.uid,
+                    email: user.email,
+                    username: username,
+                    username_lowercase: username.toLowerCase(), // For case-insensitive search
+                    friends: [] // Initialize empty friends list
+                });
+            } catch (error) {
+                console.error("Error creating user profile:", error);
+            }
+        }
+
+        // --- UI Toggle Functions ---
+
+        function showAuthView() {
+            authView.classList.remove('hidden');
+            chatView.classList.add('hidden');
+        }
+
+        function showChatView() {
+            authView.classList.add('hidden');
+            chatView.classList.remove('hidden');
+        }
+        
+        function clearChatData() {
+            // Unsubscribe from any active chat
+            if (messageUnsubscribe) {
+                messageUnsubscribe();
+                messageUnsubscribe = null;
+            }
+            // Clear lists
+            chatsList.innerHTML = '';
+            usersList.innerHTML = '';
+            messagesList.innerHTML = '';
+            // Reset to welcome screen
+            welcomeMessage.classList.remove('hidden');
+            chatArea.classList.add('hidden');
+            currentChatId = null;
+            allUsers = [];
+            allChats = []; // Clear chat cache
+            currentUserProfile = null; // Clear profile
+            pendingRequests = []; // Clear requests
+        }
+
+        // --- Data Loading Functions ---
+
+        async function loadUsersAndChats() {
+            if (!currentUserId) return;
+            
+            // Start listening for all users
+            listenForUsers();
+            
+            // Start listening for the current user's chats
+            listenForChats();
+
+            // Start listening for friend requests
+            listenForFriendRequests();
+        }
+
+        function listenForCurrentUserProfile() {
+            if (!currentUserId) return;
+            const userRef = doc(db, `artifacts/${appId}/public/data/users`, currentUserId);
+            onSnapshot(userRef, (doc) => {
+                if (doc.exists()) {
+                    currentUserProfile = doc.data();
+                    renderFriendsList();
+                    renderUsersList(); // Re-render all users to show/hide "Add" buttons
+                }
+            });
+        }
+
+        function listenForUsers() {
+            const usersRef = collection(db, `artifacts/${appId}/public/data/users`);
+            // We use onSnapshot to get real-time updates as new users sign up
+            onSnapshot(usersRef, (snapshot) => {
+                allUsers = []; // Clear cache
+                snapshot.docs.forEach(doc => {
+                    const user = doc.data();
+                    // Don't list the current user
+                    if (user.uid !== currentUserId) {
+                        allUsers.push(user); // Add to cache for group modal
+                    }
+                });
+                // Now that the user cache is updated, re-render both lists
+                renderUsersList();
+                renderFriendsList(); // Re-render friends in case user info was missing
+            });
+        }
+
+        function renderUsersList() {
+            if (!userSearchInput) return; // Guard against early renders
+            usersList.innerHTML = ''; // Clear list
+            
+            const searchTerm = userSearchInput.value.toLowerCase();
+            const friendIds = currentUserProfile?.friends || [];
+            // IDs of users who sent me a request
+            const pendingReceivedIds = pendingRequests.map(r => r.fromId);
+            // In a more complex app, we'd also track requests *we* sent.
+            // For now, this keeps the "All Users" list clean.
+
+            const filteredUsers = allUsers.filter(user => {
+                const usernameMatch = user.username.toLowerCase().includes(searchTerm);
+                const emailMatch = user.email.toLowerCase().includes(searchTerm);
+                const isFriend = friendIds.includes(user.uid);
+                const isPending = pendingReceivedIds.includes(user.uid);
+                
+                // Show user if (they match search) AND (they are not a friend) AND (they don't have a pending request)
+                return (usernameMatch || emailMatch) && !isFriend && !isPending;
+            });
+
+            filteredUsers.forEach(user => {
+                const userItem = document.createElement('li');
+                userItem.className = "p-3 hover:bg-gray-200 rounded-lg cursor-pointer transition-colors flex justify-between items-center";
+                userItem.innerHTML = `
+                    <div>
+                        <p class="font-medium text-gray-800">${user.username}</p>
+                        <p class="text-sm text-gray-500">${user.email}</p>
+                    </div>
+                    <button data-uid="${user.uid}" class="send-request-btn text-xl font-bold text-green-600 hover:text-green-500 rounded-full w-8 h-8 flex items-center justify-center">+</button>
+                `;
+                
+                // Click listener for starting a chat
+                userItem.addEventListener('click', () => startPrivateChat(user.uid, user.username));
+                
+                // Click listener for the "Add Friend" button
+                const sendRequestBtn = userItem.querySelector('.send-request-btn');
+                sendRequestBtn.addEventListener('click', (e) => {
+                    e.stopPropagation(); // Stop it from triggering the chat click
+                    handleSendFriendRequest(user.uid, user.username);
+                    sendRequestBtn.disabled = true; // Prevent double-clicks
+                    sendRequestBtn.textContent = '...';
+                });
+
+                usersList.appendChild(userItem);
+            });
+        }
+
+        // --- FIXED AND ADDED FUNCTIONS ---
+
+        function listenForChats() {
+            if (!currentUserId) return;
+            const chatsRef = collection(db, `artifacts/${appId}/public/data/chats`);
+            // Query for chats where the current user is a member
+            const q = query(chatsRef, where("members", "array-contains", currentUserId));
+            
+            onSnapshot(q, (snapshot) => {
+                allChats = []; // Clear cache
+                snapshot.docs.forEach(doc => {
+                    allChats.push({ id: doc.id, ...doc.data() });
+                });
+                // Now that the chat cache is updated, re-render the list
+                renderChatsList();
+            });
+        }
+
+        function renderChatsList() {
+            chatsList.innerHTML = ''; // Clear list
+            
+            allChats.forEach(chat => {
+                let chatName = "Chat";
+                
+                if (chat.type === "private") {
+                    // Find the *other* user's ID
+                    const otherUserId = chat.members.find(uid => uid !== currentUserId);
+                    // Find the other user's info from our **user cache**
+                    const otherUser = allUsers.find(u => u.uid === otherUserId);
+                    chatName = otherUser ? otherUser.username : "Private Chat"; // Use username
+                } else if (chat.type === "group") {
+                    chatName = chat.name || "Group Chat";
+                }
+
+                const chatItem = document.createElement('li');
+                chatItem.className = "p-3 hover:bg-gray-200 rounded-lg cursor-pointer transition-colors";
+                chatItem.innerHTML = `
+                    <p class="font-medium text-gray-800 truncate">${chatName}</p>
+                    <p class="text-sm text-gray-500">${chat.type === 'group' ? 'Group' : 'Private'}</p>
+                `;
+                chatItem.addEventListener('click', () => selectChat(chat.id, chatName));
+                chatsList.appendChild(chatItem);
+            });
+        }
+
+        function renderFriendsList() {
+            if (!friendsList || !currentUserProfile) return;
+            friendsList.innerHTML = ''; // Clear list
+            
+            const friendIds = currentUserProfile.friends || [];
+            const friends = allUsers.filter(u => friendIds.includes(u.uid));
+
+            if (friends.length === 0) {
+                friendsList.innerHTML = `<li class="p-3 text-sm text-gray-500">Add friends from the "All Users" list below.</li>`;
+                return;
+            }
+
+            friends.forEach(friend => {
+                const friendItem = document.createElement('li');
+                friendItem.className = "p-3 hover:bg-gray-200 rounded-lg cursor-pointer transition-colors";
+                friendItem.innerHTML = `
+                    <p class="font-medium text-gray-800">${friend.username}</p>
+                    <p class="text-sm text-gray-500">${friend.email}</p>
+                `;
+                friendItem.addEventListener('click', () => startPrivateChat(friend.uid, friend.username));
+                friendsList.appendChild(friendItem);
+            });
+        }
+
+        function listenForFriendRequests() {
+            if (!currentUserId) return;
+            const requestsRef = collection(db, `artifacts/${appId}/public/data/friend_requests`);
+            const q = query(requestsRef, where("toId", "==", currentUserId), where("status", "==", "pending"));
+
+            onSnapshot(q, (snapshot) => {
+                pendingRequests = [];
+                snapshot.docs.forEach(doc => {
+                    pendingRequests.push({ id: doc.id, ...doc.data() });
+                });
+                renderFriendRequestsList();
+                renderUsersList(); // Re-render all users to hide newly pending
+            });
+        }
+
+        function renderFriendRequestsList() {
+            friendRequestsList.innerHTML = ''; // Clear list
+
+            if (pendingRequests.length === 0) {
+                friendRequestsList.innerHTML = `<li class="p-3 text-sm text-gray-500">No new friend requests.</li>`;
+                return;
+            }
+
+            pendingRequests.forEach(req => {
+                const reqItem = document.createElement('li');
+                reqItem.className = "p-3 rounded-lg bg-gray-100";
+                reqItem.innerHTML = `
+                    <p class="font-medium text-gray-800">${req.fromUsername}</p>
+                    <div class="mt-2 flex space-x-2">
+                        <button data-reqid="${req.id}" data-fromid="${req.fromId}" class="accept-btn text-sm py-1 px-3 bg-green-600 text-white rounded-md hover:bg-green-700">Accept</button>
+                        <button data-reqid="${req.id}" class="decline-btn text-sm py-1 px-3 bg-red-600 text-white rounded-md hover:bg-red-700">Decline</button>
+                    </div>
+                `;
+
+                const acceptBtn = reqItem.querySelector('.accept-btn');
+                const declineBtn = reqItem.querySelector('.decline-btn');
+
+                acceptBtn.addEventListener('click', () => handleAcceptRequest(req.id, req.fromId));
+                declineBtn.addEventListener('click', () => handleDeclineRequest(req.id));
+
+                friendRequestsList.appendChild(reqItem);
+            });
+        }
+
+        // --- Chat Logic Functions ---
+
+        async function startPrivateChat(otherUserId, otherUserUsername) {
+            if (!currentUserId) return;
+
+            // 1. Check if a private chat already exists
+            const chatsRef = collection(db, `artifacts/${appId}/public/data/chats`);
+            const q = query(chatsRef, 
+                where("type", "==", "private"),
+                where("members", "array-contains", currentUserId)
+            );
+
+            try {
+                const querySnapshot = await getDocs(q);
+                let existingChat = null;
+                
+                querySnapshot.forEach(doc => {
+                    const chat = doc.data();
+                    if (chat.members.includes(otherUserId)) {
+                        existingChat = { id: doc.id, ...chat };
+                    }
+                });
+
+                if (existingChat) {
+                    // 2. If chat exists, select it
+                    selectChat(existingChat.id, otherUserUsername);
+                } else {
+                    // 3. If not, create a new private chat
+                    const newChatRef = await addDoc(chatsRef, {
+                        type: "private",
+                        members: [currentUserId, otherUserId]
+                    });
+                    selectChat(newChatRef.id, otherUserUsername);
+                }
+            } catch (error) {
+                console.error("Error starting private chat:", error);
+            }
+        }
+
+        function selectChat(chatId, chatName) {
+            // Unsubscribe from the previous chat's messages, if any
+            if (messageUnsubscribe) {
+                messageUnsubscribe();
+            }
+
+            currentChatId = chatId;
+            
+            // Update UI
+            welcomeMessage.classList.add('hidden');
+            chatArea.classList.remove('hidden');
+            chatHeaderName.textContent = chatName;
+            messagesList.innerHTML = ''; // Clear previous messages
+            
+            // Listen for new messages in this chat
+            const messagesRef = collection(db, `artifacts/${appId}/public/data/chats/${chatId}/messages`);
+            // IMPORTANT: This query requires a Firestore index.
+            // Firebase will log an error in the console with a link to create it.
+            const q = query(messagesRef, orderBy("timestamp"));
+            
+            messageUnsubscribe = onSnapshot(q, (snapshot) => {
+                snapshot.docChanges().forEach((change) => {
+                    if (change.type === "added") {
+                        const messageData = change.doc.data();
+                        renderMessage(messageData);
+                        
+                        // Check if we should send a notification
+                        if (messageData.senderId !== currentUserId) {
+                            showNotification(messageData.senderUsername, messageData.text);
+                        }
+                    }
+                });
+            });
+        }
+
+        // --- END OF FIXED/ADDED FUNCTIONS ---
+
+        async function handleSendMessage(e) {
+            e.preventDefault();
+            const text = messageInput.value;
+            
+            if (text.trim() === '' || !currentChatId || !currentUserId) {
+                return;
+            }
+            
+            const messagesRef = collection(db, `artifacts/${appId}/public/data/chats/${currentChatId}/messages`);
+            
+            try {
+                await addDoc(messagesRef, {
+                    text: text,
+                    senderId: currentUserId,
+                    senderUsername: currentUsername, // Use username
+                    timestamp: serverTimestamp()
+                });
+                messageInput.value = ''; // Clear input
+                messagesList.scrollTop = messagesList.scrollHeight; // Scroll to bottom
+            } catch (error) {
+                console.error("Error sending message:", error);
+            }
+        }
+
+        function renderMessage(message) {
+            const msgItem = document.createElement('li');
+            const isSent = message.senderId === currentUserId;
+            
+            msgItem.className = `flex flex-col mb-3 ${isSent ? 'items-end' : 'items-start'}`;
+            
+            msgItem.innerHTML = `
+                <span class="text-xs text-gray-500 mb-1 px-1 ${isSent ? 'mr-2' : 'ml-2'}">
+                    ${message.senderUsername || 'User'}
+                </span>
+                <div class="chat-bubble ${isSent ? 'chat-bubble-sent' : 'chat-bubble-received'}">
+                    ${message.text}
+                </div>
+            `;
+            messagesList.appendChild(msgItem);
+            // Auto-scroll to bottom
+            messagesList.scrollTop = messagesList.scrollHeight;
+        }
+
+        // --- Friend Request Logic ---
+
+        async function handleSendFriendRequest(otherUserId, otherUserUsername) {
+            if (!currentUserId) return;
+            // Create a unique ID for the request to prevent duplicates
+            const reqId = `${currentUserId}_${otherUserId}`;
+            const reqRef = doc(db, `artifacts/${appId}/public/data/friend_requests`, reqId);
+
+            try {
+                await setDoc(reqRef, {
+                    fromId: currentUserId,
+                    fromUsername: currentUsername,
+                    toId: otherUserId,
+                    toUsername: otherUserUsername, // Store for the recipient
+                    status: "pending",
+                    createdAt: serverTimestamp()
+                });
+                // The button will disappear from the list on the next render
+            } catch (error) {
+                console.error("Error sending friend request:", error);
+            }
+        }
+
+        async function handleAcceptRequest(requestId, fromId) {
+            if (!currentUserId) return;
+            const reqRef = doc(db, `artifacts/${appId}/public/data/friend_requests`, requestId);
+            const myUserRef = doc(db, `artifacts/${appId}/public/data/users`, currentUserId);
+            const otherUserRef = doc(db, `artifacts/${appId}/public/data/users`, fromId);
+
+            try {
+                // Add each user to the other's friends list
+                await updateDoc(myUserRef, {
+                    friends: arrayUnion(fromId)
+                });
+                await updateDoc(otherUserRef, {
+                    friends: arrayUnion(currentUserId)
+                });
+
+                // Delete the request
+                await deleteDoc(reqRef);
+            } catch (error) {
+                console.error("Error accepting friend request:", error);
+            }
+        }
+
+        async function handleDeclineRequest(requestId) {
+            const reqRef = doc(db, `artifacts/${appId}/public/data/friend_requests`, requestId);
+            try {
+                // Just delete the request
+                await deleteDoc(reqRef);
+            } catch (error) {
+                console.error("Error declining friend request:", error);
+            }
+        }
+        
+        // --- Group Chat Functions ---
+
+        function showGroupModal() {
+            // Populate the user list
+            groupMembersList.innerHTML = ''; // Clear old list
+            allUsers.forEach(user => {
+                const userCheckbox = document.createElement('div');
+                userCheckbox.className = "flex items-center";
+                userCheckbox.innerHTML = `
+                    <input id="user-${user.uid}" type="checkbox" value="${user.uid}" class="h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500">
+                    <label for="user-${user.uid}" class="ml-3 block text-sm font-medium text-gray-700">${user.username}</label>
+                `;
+                groupMembersList.appendChild(userCheckbox);
+            });
+            createGroupModal.classList.remove('hidden');
+        }
+        
+        function hideGroupModal() {
+            createGroupModal.classList.add('hidden');
+            groupModalError.textContent = ''; // Clear any errors
+            createGroupForm.reset();
+        }
+        
+        async function handleCreateGroup(e) {
+            e.preventDefault();
+            groupModalError.textContent = ''; // Clear old errors
+            const groupName = groupNameInput.value;
+            if (!groupName) {
+                groupModalError.textContent = 'Please enter a group name.';
+                return;
+            }
+
+            const selectedMembers = [currentUserId]; // Always include the creator
+            
+            groupMembersList.querySelectorAll('input[type="checkbox"]:checked').forEach(input => {
+                selectedMembers.push(input.value);
+            });
+            
+            if (selectedMembers.length <= 1) {
+                // Need at least one other person
+                groupModalError.textContent = 'Please select at least one member.';
+                return; 
+            }
+
+            try {
+                const chatsRef = collection(db, `artifacts/${appId}/public/data/chats`);
+                await addDoc(chatsRef, {
+                    type: "group",
+                    name: groupName,
+                    members: selectedMembers,
+                    createdBy: currentUserId,
+                    createdAt: serverTimestamp()
+                });
+                hideGroupModal();
+            } catch (error) {
+                console.error("Error creating group:", error);
+            }
+        }
+        
+        // --- App Initialization ---
+        // Since this is a module, it runs after the DOM is parsed.
+        // We can safely query elements and attach listeners.
+        
+        // Get all DOM elements
+        authView = document.getElementById('auth-view');
+        chatView = document.getElementById('chat-view');
+        loginForm = document.getElementById('login-form');
+        signupForm = document.getElementById('signup-form');
+        authError = document.getElementById('auth-error');
+        authToggle = document.getElementById('auth-toggle');
+        
+        userInfo = document.getElementById('user-info');
+        logoutButton = document.getElementById('logout-button');
+        createGroupBtn = document.getElementById('create-group-btn');
+        
+        chatsList = document.getElementById('chats-list');
+        usersList = document.getElementById('users-list');
+        friendsList = document.getElementById('friends-list'); // Added
+        friendRequestsList = document.getElementById('friend-requests-list'); // Added
+        userSearchInput = document.getElementById('user-search'); // Added
+        
+        chatPanel = document.getElementById('chat-panel');
+        welcomeMessage = document.getElementById('welcome-message');
+        chatArea = document.getElementById('chat-area');
+        chatHeaderName = document.getElementById('chat-header-name');
+        messagesList = document.getElementById('messages-list');
+        messageForm = document.getElementById('message-form');
+        messageInput = document.getElementById('message-input');
+
+        createGroupModal = document.getElementById('create-group-modal');
+        createGroupForm = document.getElementById('create-group-form');
+        groupNameInput = document.getElementById('group-name');
+        groupMembersList = document.getElementById('group-members-list');
+        cancelGroupBtn = document.getElementById('cancel-group-btn');
+        groupModalError = document.getElementById('group-modal-error');
+        notificationsBtn = document.getElementById('notifications-btn'); // Added
+
+        // Attach Event Listeners
+        authToggle.addEventListener('click', toggleAuthMode);
+        loginForm.addEventListener('submit', handleLogin);
+        signupForm.addEventListener('submit', handleSignUp);
+        logoutButton.addEventListener('click', handleLogout);
+        messageForm.addEventListener('submit', handleSendMessage);
+        
+        createGroupBtn.addEventListener('click', showGroupModal);
+        cancelGroupBtn.addEventListener('click', hideGroupModal);
+        createGroupForm.addEventListener('submit', handleCreateGroup);
+
+        userSearchInput.addEventListener('input', renderUsersList);
+
+        notificationsBtn.addEventListener('click', requestNotificationPermission); // Added
+
+        // Initialize Firebase
+        initFirebase();
+
+    </script>
+</head>
+<body class="bg-gray-100">
+
+    <!-- Auth View -->
+    <div id="auth-view" class="flex items-center justify-center min-h-screen">
+        <div class="w-full max-w-md p-8 space-y-6 bg-white rounded-lg shadow-xl">
+            <h2 class="text-3xl font-bold text-center text-gray-900">Welcome to EChat</h2>
+            
+            <!-- Login Form -->
+            <form id="login-form" class="space-y-6">
+                <div>
+                    <label for="login-email" class="block text-sm font-medium text-gray-700">Email</label>
+                    <input id="login-email" name="email" type="email" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500">
+                </div>
+                <div>
+                    <label for="login-password" class="block text-sm font-medium text-gray-700">Password</label>
+                    <input id="login-password" name="password" type="password" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500">
+                </div>
+                <button type="submit" class="w-full py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
+                    Login
+                </button>
+            </form>
+
+            <!-- Sign Up Form (Hidden by default) -->
+            <form id="signup-form" class="space-y-6 hidden">
+                <div>
+                    <label for="signup-username" class="block text-sm font-medium text-gray-700">Username</label>
+                    <input id="signup-username" name="username" type="text" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500">
+                </div>
+                <div>
+                    <label for="signup-email" class="block text-sm font-medium text-gray-700">Email</label>
+                    <input id="signup-email" name="email" type="email" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500">
+                </div>
+                <div>
+                    <label for="signup-password" class="block text-sm font-medium text-gray-700">Password</label>
+                    <input id="signup-password" name="password" type="password" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500">
+                </div>
+                <button type="submit" class="w-full py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500">
+                    Sign Up
+                </button>
+            </form>
+            
+            <p id="auth-error" class="text-center text-sm text-red-600"></p>
+            
+            <p class="text-center text-sm">
+                <button id="auth-toggle" class="font-medium text-blue-600 hover:text-blue-500">
+                    Don't have an account? Sign Up
+                </button>
+            </p>
+        </div>
+    </div>
+
+    <!-- Chat View (Hidden by default) -->
+    <div id="chat-view" class="h-screen flex flex-col hidden">
+        <!-- Header -->
+        <header class="bg-white shadow-sm w-full p-4 flex justify-between items-center z-10">
+            <h1 class="text-2xl font-bold text-blue-600">EChat</h1>
+            <button id="logout-button" class="py-2 px-4 rounded-md text-sm font-medium text-white bg-red-600 hover:bg-red-700">
+                Logout
+            </button>
+        </header>
+
+        <!-- Main Chat Interface -->
+        <div class="flex-1 flex overflow-hidden bg-white">
+            <!-- Sidebar -->
+            <aside class="w-full md:w-1/3 lg:w-1/4 h-full flex flex-col border-r border-gray-200 bg-gray-50">
+                <!-- User Info -->
+                <div id="user-info" class="p-4 border-b border-gray-200">
+                    <!-- Content injected by JS -->
+                </div>
+                
+                <!-- Notifications Button -->
+                <div class="p-4 border-b border-gray-200">
+                    <button id="notifications-btn" class="w-full py-2 px-4 rounded-md text-sm font-medium text-white transition-colors">
+                        Enable Notifications
+                    </button>
+                </div>
+
+                <!-- Create Group Button -->
+                <div class="p-4 border-b border-gray-200">
+                    <button id="create-group-btn" class="w-full py-2 px-4 rounded-md text-sm font-medium text-white bg-green-600 hover:bg-green-700">
+                        + Create Group Chat
+                    </button>
+                </div>
+
+                <!-- Lists Container -->
+                <div class="flex-1 overflow-y-auto sidebar-scroll">
+                    <!-- My Chats List -->
+                    <div>
+                        <h3 class="p-4 text-sm font-semibold text-gray-600 uppercase tracking-wider">My Chats</h3>
+                        <ul id="chats-list" class="divide-y divide-gray-200 px-2">
+                            <!-- Chats injected by JS -->
+                        </ul>
+                    </div>
+
+                    <!-- My Friends List -->
+                    <div class="mt-4">
+                        <h3 class="p-4 text-sm font-semibold text-gray-600 uppercase tracking-wider">My Friends</h3>
+                        <ul id="friends-list" class="divide-y divide-gray-200 px-2">
+                            <!-- Friends injected by JS -->
+                        </ul>
+                    </div>
+
+                    <!-- Friend Requests List -->
+                    <div class="mt-4">
+                        <h3 class="p-4 text-sm font-semibold text-gray-600 uppercase tracking-wider">Friend Requests</h3>
+                        <ul id="friend-requests-list" class="space-y-2 px-2">
+                            <!-- Requests injected by JS -->
+                        </ul>
+                    </div>
+
+                    <!-- All Users List -->
+                    <div class="mt-4">
+                        <h3 class="p-4 text-sm font-semibold text-gray-600 uppercase tracking-wider">Find Users</h3>
+                        <div class="px-3 pb-3">
+                            <input id="user-search" type="search" placeholder="Search by username or email..." class="w-full px-3 py-2 text-sm border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500">
+                        </div>
+                        <ul id="users-list" class="divide-y divide-gray-200 px-2">
+                            <!-- Users injected by JS -->
+                        </ul>
+                    </div>
+                </div>
+            </aside>
+
+            <!-- Chat Panel -->
+            <main id="chat-panel" class="flex-1 flex flex-col h-full">
+                <!-- Welcome Message -->
+                <div id="welcome-message" class="flex-1 flex items-center justify-center">
+                    <div class="text-center">
+                        <h2 class="text-2xl font-medium text-gray-600">Welcome to EChat</h2>
+                        <p class="mt-2 text-gray-500">Select a chat or user from the left to start messaging.</p>
+                    </div>
+                </div>
+
+                <!-- Chat Area (Hidden by default) -->
+                <div id="chat-area" class="flex-1 flex flex-col hidden h-full">
+                    <!-- Chat Header -->
+                    <div class="p-4 border-b border-gray-200 bg-white">
+                        <h3 id="chat-header-name" class="text-lg font-semibold text-gray-900">Chat Name</h3>
+                    </div>
+                    
+                    <!-- Messages List -->
+                    <ul id="messages-list" class="flex-1 p-4 space-y-2 overflow-y-auto chat-scroll bg-gray-100">
+                        <!-- Messages injected by JS -->
+                    </ul>
+                    
+                    <!-- Message Input Form -->
+                    <form id="message-form" class="p-4 border-t border-gray-200 bg-white">
+                        <div class="flex items-center space-x-3">
+                            <input id="message-input" type="text" placeholder="Type your message..." autocomplete="off"
+                                   class="flex-1 block w-full px-4 py-3 border border-gray-300 rounded-full shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500">
+                            <button type="submit" class="inline-flex items-center justify-center h-12 w-12 rounded-full text-white bg-blue-600 hover:bg-blue-700 focus:outline-none">
+                                <!-- Send Icon SVG -->
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" viewBox="0 0 20 20" fill="currentColor">
+                                    <path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009.58 16.51l.755-4.286a1 1 0 00-1.64-1.055l-1.416 1.416a1 1 0 101.414 1.414l1.416-1.416a1 1 0 00-1.055-1.64l-4.286.755a1 1 0 00-1.03 1.03l-1.429 5a1 1 0 001.409 1.169l14-7a1 1 0 000-1.788l-7-14z" />
+                                </svg>
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </main>
+        </div>
+    </div>
+    
+    <!-- Create Group Modal (Hidden by default) -->
+    <div id="create-group-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 hidden">
+        <div class="bg-white rounded-lg shadow-xl w-full max-w-lg p-6">
+            <h3 class="text-xl font-semibold text-gray-900 mb-4">Create a New Group</h3>
+            <form id="create-group-form">
+                <div class="mb-4">
+                    <label for="group-name" class="block text-sm font-medium text-gray-700">Group Name</label>
+                    <input type="text" id="group-name" name="group-name" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500">
+                </div>
+                <div class="mb-6">
+                    <label class="block text-sm font-medium text-gray-700 mb-2">Select Members</label>
+                    <div id="group-members-list" class="max-h-60 overflow-y-auto space-y-2 p-3 border border-gray-200 rounded-md">
+                        <!-- User checkboxes injected by JS -->
+                    </div>
+                </div>
+                <p id="group-modal-error" class="text-sm text-red-600 mb-4"></p>
+                <div class="flex justify-end space-x-3">
+                    <button type="button" id="cancel-group-btn" class="py-2 px-4 rounded-md text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200">
+                        Cancel
+                    </button>
+                    <button type="submit" class="py-2 px-4 rounded-md text-sm font-medium text-white bg-green-600 hover:bg-green-700">
+                        Create Group
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+</body>
+</html>
